@@ -3,7 +3,7 @@
 #include <unistd.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
-
+#include <ctime>  // For time formatting
 
 #include <iostream>
 extern "C"{
@@ -29,6 +29,55 @@ extern "C"{
 
 namespace gscam {
 
+  struct userdata {
+    GstClockTime bt;
+    double time_offset_seconds;
+    std::string recording_path;
+    std::string prefix;
+  };
+
+
+  // Callback function to modify the full location (directory + filename) before each split
+  static void format_location_full_callback(GstElement *splitmux, guint fragment_id, GstSample *first_sample, gpointer udata) {
+
+      // Extract the struct containing the two double values
+      userdata* values = static_cast<userdata*>(udata);
+      GstClockTime bt = values->bt;
+      double time_offset_seconds = values->time_offset_seconds;
+      std::string recording_path = values->recording_path;
+      std::string prefix = values->prefix;
+
+      // Check if the sample is valid
+      if (first_sample) {
+          GstBuffer *buffer = gst_sample_get_buffer(first_sample);  // Get the buffer from the sample
+
+          // Ensure the buffer is valid and has PTS (presentation timestamp)
+          if (buffer && GST_BUFFER_PTS_IS_VALID(buffer)) {
+              double abs_stamp_seconds = GST_TIME_AS_SECONDS(buffer->pts+bt)+time_offset_seconds;
+              long unsigned int abs_stamp_nano_seconds = abs_stamp_seconds * 1e9;
+
+              // Convert timestamp to human-readable format
+              struct tm *timeinfo;
+              char timestamp_str[20];  // Enough for "YYYY-MM-DD-HH-MM-SS"
+              time_t timestamp_sec = static_cast<time_t>(abs_stamp_seconds);
+              timeinfo = localtime(&timestamp_sec);  // Convert to local time
+              strftime(timestamp_str, sizeof(timestamp_str), "%Y-%m-%d-%H-%M-%S", timeinfo);  // Format time
+
+              std::ostringstream new_filename;
+              new_filename << recording_path << timestamp_str << "_" << std::to_string(abs_stamp_nano_seconds) << "_" << prefix << ".mp4";  // Full path
+
+              // Set the new full path to the location in the splitmuxsink
+              g_print("Setting new full location for splitmuxsink: %s\n", new_filename.str().c_str());
+              g_object_set(G_OBJECT(splitmux), "location", new_filename.str().c_str(), NULL);
+          } else {
+              g_printerr("Error: No valid timestamp found in the first sample buffer.\n");
+          }
+      } else {
+          g_printerr("Error: Received an invalid GstSample.\n");
+      }
+  }
+
+
   GSCam::GSCam(ros::NodeHandle nh_camera, ros::NodeHandle nh_private) :
     gsconfig_(""),
     pipeline_(NULL),
@@ -42,6 +91,15 @@ namespace gscam {
 
   GSCam::~GSCam()
   {
+  }
+
+  static guint frame_counter = 0;  // Global frame counter
+
+  // Callback function to count frames
+  static GstPadProbeReturn frame_probe_callback(GstPad *pad, GstPadProbeInfo *info, gpointer user_data) {
+    frame_counter++;
+    printf("Frame number: %u\n", frame_counter);
+    return GST_PAD_PROBE_OK;
   }
 
   bool GSCam::configure()
@@ -79,6 +137,10 @@ namespace gscam {
     // Get the camera parameters file
     nh_private_.getParam("camera_info_url", camera_info_url_);
     nh_private_.getParam("camera_name", camera_name_);
+
+    // Rosbag recording related
+    nh_private_.getParam("recording_path", recording_path_);
+    nh_private_.getParam("prefix", prefix_);
 
     // Get the image encoding
     nh_private_.param("image_encoding", image_encoding_, sensor_msgs::image_encodings::RGB8);
@@ -185,6 +247,9 @@ namespace gscam {
       }
 
       gst_object_unref(outelement);
+
+
+
     } else {
       GstElement* launchpipe = pipeline_;
       pipeline_ = gst_pipeline_new(NULL);
@@ -217,6 +282,7 @@ namespace gscam {
     } else {
       ROS_DEBUG_STREAM("Stream is PAUSED.");
     }
+
 
     // Create ROS camera interface
     if (image_encoding_ == "jpeg") {
@@ -263,11 +329,23 @@ namespace gscam {
       }
     }
 
+
+
     if(gst_element_set_state(pipeline_, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
       ROS_ERROR("Could not start stream!");
       return;
     }
     ROS_INFO("Started stream.");
+
+
+    // 
+    GstClockTime bt = gst_element_get_base_time(pipeline_);
+    // Get the splitmuxsink element from the pipeline
+    GstElement *splitmuxsink = gst_bin_get_by_name(GST_BIN(pipeline_), "splitmuxsink0");
+    userdata udata = {bt, time_offset_, recording_path_, prefix_};  // Create a userdata struct to pass to the callback
+    // Connect the "format-location-full" signal to the callback function
+    g_signal_connect(splitmuxsink, "format-location-full", G_CALLBACK(format_location_full_callback), &udata);
+
 
     // Poll the data as fast a spossible
     while(ros::ok()) 
@@ -294,9 +372,7 @@ namespace gscam {
       guint8* &buf_data = buf->data;
 #endif
       GstClockTime bt = gst_element_get_base_time(pipeline_);
-      // ROS_INFO("New buffer: timestamp %.6f %lu %lu %.3f",
-      //         GST_TIME_AS_USECONDS(buf->timestamp+bt)/1e6+time_offset_, buf->timestamp, bt, time_offset_);
-
+      //ROS_INFO("New buffer: timestamp %.6f %lu %lu %.3f", GST_TIME_AS_USECONDS(buf->pts+bt)/1e6+time_offset_, buf->pts, bt, time_offset_);
 
       // Stop on end of stream
       if (!buf) {
@@ -455,4 +531,7 @@ namespace gscam {
     return GST_FLOW_OK;
   }
 
+
 }
+
+
