@@ -1,20 +1,17 @@
 <launch>
   <arg name="prefix" default="rgb" />
-  <arg name="recording_path" default="/tmp/recording_path" />
-
+  <arg name="recording_path" default="/tmp/recording_path/" />
 
   <node pkg="gscam" type="gscam" name="gscam" output="screen">
-      <param name="~gscam_config" value="videotestsrc is-live=true pattern=smpte ! video/x-raw,width=2560,height=1440,framerate=25/1 !  videoconvert ! x264enc tune=zerolatency ! h264parse ! tee name=t t. ! queue ! splitmuxsink max-size-time=1000000000 t. ! queue ! avdec_h264 ! videoconvert "/>
+      <param name="~gscam_config" value="videotestsrc is-live=true pattern=smpte ! video/x-raw,width=2560,height=1440,framerate=25/1 !  videoconvert ! x264enc tune=zerolatency ! h264parse ! tee name=t t. ! queue ! splitmuxsink max-size-time=2000000000 t. ! queue ! avdec_h264 ! videoconvert "/>
       <!-- <param name="~camera_name" value="default"/> -->
       <!-- <param name="~frame_id" value="/cam_tf"/>  -->
       <!-- <param name="~sync_sink" value="true"/> -->
       <param name="~reopen_on_eof" value="true"/>
       <param name="~use_gst_timestamps" value="true"/>
-      <param name="~recording_path" value="/tmp/recording_path"/>
-      <param name="~prefix" value="rgb"/>
-
+      <param name="~recording_path" value="$(arg recording_path)"/>
+      <param name="~prefix" value="$(arg prefix)"/>
       <remap from="/image_raw" to="/$(arg prefix)/image_raw" />      
       <remap from="/rgb/camera_info" to="/zero" />    
-
   </node>
 </launch>

@@ -36,10 +36,8 @@ namespace gscam {
     std::string prefix;
   };
 
-
   // Callback function to modify the full location (directory + filename) before each split
   static void format_location_full_callback(GstElement *splitmux, guint fragment_id, GstSample *first_sample, gpointer udata) {
-
       // Extract the struct containing the two double values
       userdata* values = static_cast<userdata*>(udata);
       GstClockTime bt = values->bt;
@@ -53,6 +51,7 @@ namespace gscam {
 
           // Ensure the buffer is valid and has PTS (presentation timestamp)
           if (buffer && GST_BUFFER_PTS_IS_VALID(buffer)) {
+              // Extract timestamp of first frame
               double abs_stamp_seconds = GST_TIME_AS_SECONDS(buffer->pts+bt)+time_offset_seconds;
               long unsigned int abs_stamp_nano_seconds = abs_stamp_seconds * 1e9;
 
@@ -85,7 +84,9 @@ namespace gscam {
     nh_(nh_camera),
     nh_private_(nh_private),
     image_transport_(nh_camera),
-    camera_info_manager_(nh_camera)
+    camera_info_manager_(nh_camera),
+    recording_path_(""),
+    prefix_("")
   {
   }
 
@@ -329,23 +330,26 @@ namespace gscam {
       }
     }
 
-
-
     if(gst_element_set_state(pipeline_, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
       ROS_ERROR("Could not start stream!");
       return;
     }
     ROS_INFO("Started stream.");
 
+    if (recording_path_ != ""){
+      // Get the base time of the pipeline
+      GstClockTime bt = gst_element_get_base_time(pipeline_);
+      // Get the splitmuxsink element from the pipeline
+      GstElement *splitmuxsink = gst_bin_get_by_name(GST_BIN(pipeline_), "splitmuxsink0");
+      userdata udata = {bt, time_offset_, recording_path_, prefix_};  // Create a userdata struct to pass to the callback
+      ROS_INFO("Record to: %s", recording_path_.c_str());
+      // Connect the "format-location-full" signal to the callback function
+      g_signal_connect(splitmuxsink, "format-location-full", G_CALLBACK(format_location_full_callback), &udata);
+    }
+    else{
+      ROS_INFO("No recording path specified, not using splitmuxsink and recording to raw video.");
 
-    // 
-    GstClockTime bt = gst_element_get_base_time(pipeline_);
-    // Get the splitmuxsink element from the pipeline
-    GstElement *splitmuxsink = gst_bin_get_by_name(GST_BIN(pipeline_), "splitmuxsink0");
-    userdata udata = {bt, time_offset_, recording_path_, prefix_};  // Create a userdata struct to pass to the callback
-    // Connect the "format-location-full" signal to the callback function
-    g_signal_connect(splitmuxsink, "format-location-full", G_CALLBACK(format_location_full_callback), &udata);
-
+    }
 
     // Poll the data as fast a spossible
     while(ros::ok()) 
