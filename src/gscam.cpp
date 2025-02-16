@@ -33,7 +33,7 @@ namespace gscam {
     GstClockTime bt;
     double time_offset_seconds;
     std::string recording_path;
-    std::string prefix;
+    std::string suffix;
   };
 
   // Callback function to modify the full location (directory + filename) before each split
@@ -43,7 +43,7 @@ namespace gscam {
       GstClockTime bt = values->bt;
       double time_offset_seconds = values->time_offset_seconds;
       std::string recording_path = values->recording_path;
-      std::string prefix = values->prefix;
+      std::string suffix = values->suffix;
 
       // Check if the sample is valid
       if (first_sample) {
@@ -57,13 +57,13 @@ namespace gscam {
 
               // Convert timestamp to human-readable format
               struct tm *timeinfo;
-              char timestamp_str[20];  // Enough for "YYYY-MM-DD-HH-MM-SS"
+              char timestamp_str[21];  // Enough for "_YYYY-MM-DD-HH-MM-SS"
               time_t timestamp_sec = static_cast<time_t>(abs_stamp_seconds);
               timeinfo = localtime(&timestamp_sec);  // Convert to local time
-              strftime(timestamp_str, sizeof(timestamp_str), "%Y-%m-%d-%H-%M-%S", timeinfo);  // Format time
+              strftime(timestamp_str, sizeof(timestamp_str), "_%Y-%m-%d-%H-%M-%S", timeinfo);  // Format time
 
               std::ostringstream new_filename;
-              new_filename << recording_path << timestamp_str << "_" << std::to_string(abs_stamp_nano_seconds) << "_" << prefix << ".mp4";  // Full path
+              new_filename << recording_path << timestamp_str << "_" << std::to_string(abs_stamp_nano_seconds) << "_" << suffix << ".mp4";  // Full path
 
               // Set the new full path to the location in the splitmuxsink
               g_print("Setting new full location for splitmuxsink: %s\n", new_filename.str().c_str());
@@ -86,7 +86,7 @@ namespace gscam {
     image_transport_(nh_camera),
     camera_info_manager_(nh_camera),
     recording_path_(""),
-    prefix_("")
+    suffix_("")
   {
   }
 
@@ -141,7 +141,7 @@ namespace gscam {
 
     // Rosbag recording related
     nh_private_.getParam("recording_path", recording_path_);
-    nh_private_.getParam("prefix", prefix_);
+    nh_private_.getParam("suffix", suffix_);
 
     // Get the image encoding
     nh_private_.param("image_encoding", image_encoding_, sensor_msgs::image_encodings::RGB8);
@@ -341,10 +341,9 @@ namespace gscam {
       GstClockTime bt = gst_element_get_base_time(pipeline_);
       // Get the splitmuxsink element from the pipeline
       GstElement *splitmuxsink = gst_bin_get_by_name(GST_BIN(pipeline_), "splitmuxsink0");
-      userdata udata = {bt, time_offset_, recording_path_, prefix_};  // Create a userdata struct to pass to the callback
-      ROS_INFO("Record to: %s", recording_path_.c_str());
+      userdata* udata = new userdata{bt, time_offset_, recording_path_, suffix_};
       // Connect the "format-location-full" signal to the callback function
-      g_signal_connect(splitmuxsink, "format-location-full", G_CALLBACK(format_location_full_callback), &udata);
+      g_signal_connect(splitmuxsink, "format-location-full", G_CALLBACK(format_location_full_callback), udata);
     }
     else{
       ROS_INFO("No recording path specified, not using splitmuxsink and recording to raw video.");

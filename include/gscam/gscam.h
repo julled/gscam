@@ -52,7 +52,7 @@ namespace gscam {
     std::string camera_name_;
     std::string camera_info_url_;
     std::string recording_path_;
-    std::string prefix_;
+    std::string suffix_;
 
     // ROS Inteface
     // Calibration between ros::Time and gst timestamps
