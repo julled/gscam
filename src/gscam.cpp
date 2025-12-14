@@ -47,7 +47,7 @@ struct SplitMuxContext
   GstClockTime base_time;
   int64_t time_offset_ns;
   std::string recording_path;
-  std::string suffix;
+  std::string recording_suffix;
 };
 
 std::string build_segment_path(const SplitMuxContext & ctx, GstBuffer * buffer)
@@ -73,8 +73,8 @@ std::string build_segment_path(const SplitMuxContext & ctx, GstBuffer * buffer)
     os << '/';
   }
   os << std::put_time(&tm_time, "%Y-%m-%d-%H-%M-%S") << '_' << absolute_ns;
-  if (!ctx.suffix.empty()) {
-    os << '_' << ctx.suffix;
+  if (!ctx.recording_suffix.empty()) {
+    os << '_' << ctx.recording_suffix;
   }
   os << ".mp4";
   return os.str();
@@ -176,6 +176,7 @@ bool GSCam::configure()
   camera_name_ = declare_parameter("camera_name", "");
   recording_path_ = declare_parameter("recording_path", "");
   recording_suffix_ = declare_parameter("recording_suffix", "");
+  recording_enabled = declare_parameter("recording_enabled", false);
 
   // Get the image encoding
   image_encoding_ =
@@ -365,17 +366,31 @@ void GSCam::publish_stream()
     }
   }
 
+  if (!recording_enabled) {
+    disable_splitmux_recording();
+  }
+
   if (gst_element_set_state(pipeline_, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
     RCLCPP_ERROR(get_logger(), "Could not start stream!");
     return;
   }
   RCLCPP_INFO(get_logger(), "Started stream.");
 
-  if (!recording_path_.empty()) {
-    setup_splitmux_recording();
+  if (recording_enabled) {
+    if (!recording_path_.empty()) {
+      setup_splitmux_recording();
+    } else {
+      RCLCPP_WARN(
+        get_logger(),
+        "record_to_file is true but no recording_path specified; recording disabled.");
+    }
+  } else if (!recording_path_.empty()) {
+    RCLCPP_INFO(
+      get_logger(),
+      "record_to_file is false; recording_path '%s' is ignored.", recording_path_.c_str());
   } else {
     RCLCPP_DEBUG(
-      get_logger(), "No recording_path specified; splitmuxsink filename callback not connected.");
+      get_logger(), "Recording disabled; splitmuxsink filename callback not connected.");
   }
 
   // Poll the data as fast a spossible
@@ -587,6 +602,111 @@ void GSCam::setup_splitmux_recording()
     get_logger(),
     "Recording enabled: splitmuxsink segments will be written to '%s'",
     recording_path_.c_str());
+}
+
+void GSCam::disable_splitmux_recording()
+{
+  GstElement * splitmuxsink = find_splitmuxsink();
+  if (splitmuxsink == nullptr) {
+    RCLCPP_DEBUG(
+      get_logger(),
+      "record_to_file disabled but no splitmuxsink present in the pipeline.");
+    return;
+  }
+
+  GstPad * sink_pad = nullptr;
+  GstIterator * sink_iter = gst_element_iterate_sink_pads(splitmuxsink);
+  if (sink_iter != nullptr) {
+    GValue item = G_VALUE_INIT;
+    if (gst_iterator_next(sink_iter, &item) == GST_ITERATOR_OK) {
+      sink_pad = GST_PAD(g_value_get_object(&item));
+      gst_object_ref(sink_pad);
+      g_value_unset(&item);
+    }
+    gst_iterator_free(sink_iter);
+  }
+
+  if (sink_pad == nullptr) {
+    RCLCPP_WARN(
+      get_logger(),
+      "record_to_file disabled but splitmuxsink exposes no sink pads.");
+    gst_object_unref(splitmuxsink);
+    return;
+  }
+
+  GstPad * peer_pad = gst_pad_get_peer(sink_pad);
+  if (peer_pad == nullptr) {
+    RCLCPP_WARN(
+      get_logger(),
+      "record_to_file disabled but splitmuxsink had no upstream peer pad.");
+    gst_object_unref(sink_pad);
+    gst_object_unref(splitmuxsink);
+    return;
+  }
+
+  GstElement * fakesink = gst_element_factory_make("fakesink", "gscam_splitmux_disabled");
+  if (fakesink == nullptr) {
+    RCLCPP_ERROR(get_logger(), "Failed to create fakesink to replace splitmuxsink.");
+    gst_object_unref(peer_pad);
+    gst_object_unref(sink_pad);
+    gst_object_unref(splitmuxsink);
+    return;
+  }
+  g_object_set(G_OBJECT(fakesink), "sync", FALSE, NULL);
+
+  if (!gst_bin_add(GST_BIN(pipeline_), fakesink)) {
+    RCLCPP_ERROR(get_logger(), "Failed to add fakesink to pipeline; recording cannot be disabled.");
+    gst_object_unref(fakesink);
+    gst_object_unref(peer_pad);
+    gst_object_unref(sink_pad);
+    gst_object_unref(splitmuxsink);
+    return;
+  }
+
+  GstPad * fake_sink_pad = gst_element_get_static_pad(fakesink, "sink");
+  if (fake_sink_pad == nullptr) {
+    RCLCPP_ERROR(get_logger(), "Failed to access fakesink sink pad; recording cannot be disabled.");
+    gst_bin_remove(GST_BIN(pipeline_), fakesink);
+    gst_object_unref(fakesink);
+    gst_object_unref(peer_pad);
+    gst_object_unref(sink_pad);
+    gst_object_unref(splitmuxsink);
+    return;
+  }
+
+  if (!gst_pad_unlink(peer_pad, sink_pad)) {
+    RCLCPP_WARN(get_logger(), "Unable to unlink splitmuxsink from pipeline; recording remains enabled.");
+    gst_object_unref(fake_sink_pad);
+    gst_bin_remove(GST_BIN(pipeline_), fakesink);
+    gst_object_unref(fakesink);
+    gst_object_unref(peer_pad);
+    gst_object_unref(sink_pad);
+    gst_object_unref(splitmuxsink);
+    return;
+  }
+
+  if (gst_pad_link(peer_pad, fake_sink_pad) != GST_PAD_LINK_OK) {
+    RCLCPP_ERROR(get_logger(), "Failed to link fakesink; restoring original splitmuxsink connection.");
+    gst_pad_link(peer_pad, sink_pad);
+    gst_object_unref(fake_sink_pad);
+    gst_bin_remove(GST_BIN(pipeline_), fakesink);
+    gst_object_unref(fakesink);
+    gst_object_unref(peer_pad);
+    gst_object_unref(sink_pad);
+    gst_object_unref(splitmuxsink);
+    return;
+  }
+
+  gst_element_release_request_pad(splitmuxsink, sink_pad);
+  gst_object_unref(fake_sink_pad);
+  gst_object_unref(peer_pad);
+  gst_object_unref(sink_pad);
+
+  gst_element_set_state(splitmuxsink, GST_STATE_NULL);
+  gst_bin_remove(GST_BIN(pipeline_), splitmuxsink);
+  gst_object_unref(splitmuxsink);
+
+  RCLCPP_INFO(get_logger(), "record_to_file is false: splitmuxsink replaced with fakesink.");
 }
 
 void GSCam::cleanup_stream()

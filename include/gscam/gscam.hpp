@@ -48,6 +48,7 @@ private:
   void publish_stream();
   void cleanup_stream();
   void setup_splitmux_recording();
+  void disable_splitmux_recording();
   GstElement * find_splitmuxsink() const;
 
   void run();
@@ -74,6 +75,7 @@ private:
   bool use_sensor_data_qos_;
   std::string recording_path_;
   std::string recording_suffix_;
+  bool recording_enabled;
 
   // ROS Inteface
   // Calibration between ros::Time and gst timestamps
