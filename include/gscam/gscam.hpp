@@ -47,6 +47,8 @@ private:
   bool init_stream();
   void publish_stream();
   void cleanup_stream();
+  void setup_splitmux_recording();
+  GstElement * find_splitmuxsink() const;
 
   void run();
 
@@ -70,10 +72,13 @@ private:
   std::string camera_name_;
   std::string camera_info_url_;
   bool use_sensor_data_qos_;
+  std::string recording_path_;
+  std::string recording_suffix_;
 
   // ROS Inteface
   // Calibration between ros::Time and gst timestamps
-  uint64_t time_offset_;
+  int64_t time_offset_;
+  GstClockTime pipeline_base_time_;
   camera_info_manager::CameraInfoManager camera_info_manager_;
   image_transport::CameraPublisher camera_pub_;
   // Case of a jpeg only publisher

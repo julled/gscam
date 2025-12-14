@@ -18,6 +18,11 @@
 #include <sys/shm.h>
 #include <iostream>
 #include <string>
+#include <filesystem>
+#include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 
 extern "C" {
 #include "gst/gst.h"
@@ -34,6 +39,70 @@ extern "C" {
 
 #include "gscam/gscam.hpp"
 
+namespace
+{
+
+struct SplitMuxContext
+{
+  GstClockTime base_time;
+  int64_t time_offset_ns;
+  std::string recording_path;
+  std::string suffix;
+};
+
+std::string build_segment_path(const SplitMuxContext & ctx, GstBuffer * buffer)
+{
+  const int64_t absolute_ns =
+    static_cast<int64_t>(GST_BUFFER_PTS(buffer)) +
+    static_cast<int64_t>(ctx.base_time) +
+    ctx.time_offset_ns;
+
+  const auto time_point = std::chrono::system_clock::time_point(std::chrono::nanoseconds(
+      absolute_ns));
+  std::time_t seconds = std::chrono::system_clock::to_time_t(time_point);
+  std::tm tm_time;
+#if defined(_WIN32)
+  localtime_s(&tm_time, &seconds);
+#else
+  localtime_r(&seconds, &tm_time);
+#endif
+
+  std::ostringstream os;
+  os << ctx.recording_path;
+  if (!ctx.recording_path.empty() && ctx.recording_path.back() != '/') {
+    os << '/';
+  }
+  os << std::put_time(&tm_time, "%Y-%m-%d-%H-%M-%S") << '_' << absolute_ns;
+  if (!ctx.suffix.empty()) {
+    os << '_' << ctx.suffix;
+  }
+  os << ".mp4";
+  return os.str();
+}
+
+void format_location_full_cb(
+  GstElement * splitmux, guint, GstSample * first_sample, gpointer udata)
+{
+  if (first_sample == nullptr) {
+    g_printerr("splitmuxsink format-location-full: no first sample provided\n");
+    return;
+  }
+
+  auto * ctx = static_cast<SplitMuxContext *>(udata);
+  GstBuffer * buffer = gst_sample_get_buffer(first_sample);
+
+  if (buffer == nullptr || !GST_BUFFER_PTS_IS_VALID(buffer)) {
+    g_printerr("splitmuxsink format-location-full: invalid buffer timestamp\n");
+    return;
+  }
+
+  const auto location = build_segment_path(*ctx, buffer);
+  g_object_set(G_OBJECT(splitmux), "location", location.c_str(), NULL);
+  g_print("splitmuxsink: writing segment to %s\n", location.c_str());
+}
+
+}  // namespace
+
 namespace gscam
 {
 
@@ -43,6 +112,8 @@ GSCam::GSCam(const rclcpp::NodeOptions & options)
   pipeline_(NULL),
   sink_(NULL),
   camera_info_manager_(this),
+  time_offset_(0),
+  pipeline_base_time_(0),
   stop_signal_(false)
 {
   pipeline_thread_ = std::thread(
@@ -103,6 +174,8 @@ bool GSCam::configure()
   // Get the camera parameters file
   camera_info_url_ = declare_parameter("camera_info_url", "");
   camera_name_ = declare_parameter("camera_name", "");
+  recording_path_ = declare_parameter("recording_path", "");
+  recording_suffix_ = declare_parameter("recording_suffix", "");
 
   // Get the image encoding
   image_encoding_ =
@@ -236,8 +309,9 @@ bool GSCam::init_stream()
   GstClock * clock = gst_system_clock_obtain();
   GstClockTime ct = gst_clock_get_time(clock);
   gst_object_unref(clock);
-  time_offset_ = now().nanoseconds() - GST_TIME_AS_NSECONDS(ct);
-  RCLCPP_INFO(get_logger(), "Time offset: %.6f", rclcpp::Time(time_offset_).seconds());
+  time_offset_ =
+    static_cast<int64_t>(now().nanoseconds()) - static_cast<int64_t>(GST_TIME_AS_NSECONDS(ct));
+  RCLCPP_INFO(get_logger(), "Time offset: %.6f", static_cast<double>(time_offset_) / 1e9);
 
   gst_element_set_state(pipeline_, GST_STATE_PAUSED);
 
@@ -296,6 +370,13 @@ void GSCam::publish_stream()
     return;
   }
   RCLCPP_INFO(get_logger(), "Started stream.");
+
+  if (!recording_path_.empty()) {
+    setup_splitmux_recording();
+  } else {
+    RCLCPP_DEBUG(
+      get_logger(), "No recording_path specified; splitmuxsink filename callback not connected.");
+  }
 
   // Poll the data as fast a spossible
   while (!stop_signal_ && rclcpp::ok()) {
@@ -414,6 +495,98 @@ void GSCam::publish_stream()
       gst_sample_unref(sample);
     }
   }
+}
+
+GstElement * GSCam::find_splitmuxsink() const
+{
+  if (!GST_IS_BIN(pipeline_)) {
+    return nullptr;
+  }
+
+  const char * candidate_names[] = {"splitmuxsink0", "splitmuxsink"};
+  for (const auto * name : candidate_names) {
+    GstElement * element = gst_bin_get_by_name(GST_BIN(pipeline_), name);
+    if (element != nullptr) {
+      return element;
+    }
+  }
+
+  GstIterator * iterator = gst_bin_iterate_elements(GST_BIN(pipeline_));
+  GValue item = G_VALUE_INIT;
+  GstElement * found = nullptr;
+
+  while (gst_iterator_next(iterator, &item) == GST_ITERATOR_OK) {
+    GstElement * element = GST_ELEMENT(g_value_get_object(&item));
+    GstElementFactory * factory = gst_element_get_factory(element);
+    if (factory != nullptr) {
+      const gchar * factory_name = gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory));
+      if (factory_name != nullptr && std::string(factory_name) == "splitmuxsink") {
+        found = GST_ELEMENT(gst_object_ref(element));
+        g_value_unset(&item);
+        break;
+      }
+    }
+    g_value_unset(&item);
+  }
+  gst_iterator_free(iterator);
+  return found;
+}
+
+void GSCam::setup_splitmux_recording()
+{
+  namespace fs = std::filesystem;
+
+  const fs::path target_dir(recording_path_);
+  std::error_code ec;
+  if (!fs::exists(target_dir)) {
+    if (!fs::create_directories(target_dir, ec)) {
+      RCLCPP_FATAL(
+        get_logger(),
+        "Unable to create recording directory '%s': %s",
+        recording_path_.c_str(), ec.message().c_str());
+      stop_signal_ = true;
+      rclcpp::shutdown();
+      return;
+    }
+  } else if (!fs::is_directory(target_dir, ec)) {
+    RCLCPP_FATAL(
+      get_logger(),
+      "recording_path '%s' exists but is not a directory",
+      recording_path_.c_str());
+    stop_signal_ = true;
+    rclcpp::shutdown();
+    return;
+  }
+
+  GstElement * splitmuxsink = find_splitmuxsink();
+  if (splitmuxsink == nullptr) {
+    RCLCPP_WARN(
+      get_logger(),
+      "recording_path provided but no splitmuxsink was found in the configured pipeline.");
+    return;
+  }
+
+  pipeline_base_time_ = gst_element_get_base_time(pipeline_);
+
+  auto * ctx = new SplitMuxContext{pipeline_base_time_, time_offset_, recording_path_,
+    recording_suffix_};
+
+  g_signal_connect_data(
+    splitmuxsink,
+    "format-location-full",
+    G_CALLBACK(format_location_full_cb),
+    ctx,
+    [](gpointer data, GClosure *) {
+      delete static_cast<SplitMuxContext *>(data);
+    },
+    static_cast<GConnectFlags>(0));
+
+  gst_object_unref(splitmuxsink);
+
+  RCLCPP_INFO(
+    get_logger(),
+    "Recording enabled: splitmuxsink segments will be written to '%s'",
+    recording_path_.c_str());
 }
 
 void GSCam::cleanup_stream()
