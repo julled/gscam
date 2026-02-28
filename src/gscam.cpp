@@ -366,16 +366,6 @@ void GSCam::publish_stream()
     }
   }
 
-  if (!recording_enabled) {
-    disable_splitmux_recording();
-  }
-
-  if (gst_element_set_state(pipeline_, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
-    RCLCPP_ERROR(get_logger(), "Could not start stream!");
-    return;
-  }
-  RCLCPP_INFO(get_logger(), "Started stream.");
-
   if (recording_enabled) {
     if (!recording_path_.empty()) {
       setup_splitmux_recording();
@@ -384,14 +374,15 @@ void GSCam::publish_stream()
         get_logger(),
         "record_to_file is true but no recording_path specified; recording disabled.");
     }
-  } else if (!recording_path_.empty()) {
-    RCLCPP_INFO(
-      get_logger(),
-      "record_to_file is false; recording_path '%s' is ignored.", recording_path_.c_str());
   } else {
-    RCLCPP_DEBUG(
-      get_logger(), "Recording disabled; splitmuxsink filename callback not connected.");
+    disable_splitmux_recording();
   }
+
+  if (gst_element_set_state(pipeline_, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
+    RCLCPP_ERROR(get_logger(), "Could not start stream!");
+    return;
+  }
+  RCLCPP_INFO(get_logger(), "Started stream.");
 
   // Poll the data as fast a spossible
   while (!stop_signal_ && rclcpp::ok()) {
