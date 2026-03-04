@@ -233,7 +233,13 @@ bool GSCam::init_stream()
 
   // Create RGB sink
   sink_ = gst_element_factory_make("appsink", NULL);
+  gst_app_sink_set_max_buffers(GST_APP_SINK(sink_), 1);
+  gst_app_sink_set_drop(GST_APP_SINK(sink_), TRUE);
   GstCaps * caps = gst_app_sink_get_caps(GST_APP_SINK(sink_));
+  if (caps) {
+    gst_caps_unref(caps);
+    caps = nullptr;
+  }
 
   // http://gstreamer.freedesktop.org/data/doc/gstreamer/head/pwg/html/section-types-definitions.html
   if (image_encoding_ == sensor_msgs::image_encodings::RGB8) {
@@ -430,10 +436,12 @@ void GSCam::publish_stream()
 
     // Get the image width and height
     GstPad * pad = gst_element_get_static_pad(sink_, "sink");
-    const GstCaps * caps = gst_pad_get_current_caps(pad);
-    GstStructure * structure = gst_caps_get_structure(caps, 0);
+    GstCaps * frame_caps = gst_pad_get_current_caps(pad);
+    GstStructure * structure = gst_caps_get_structure(frame_caps, 0);
     gst_structure_get_int(structure, "width", &width_);
     gst_structure_get_int(structure, "height", &height_);
+    gst_caps_unref(frame_caps);
+    gst_object_unref(pad);
 
     // Update header information
     sensor_msgs::msg::CameraInfo cur_cinfo = camera_info_manager_.getCameraInfo();
