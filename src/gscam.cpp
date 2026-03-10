@@ -392,13 +392,19 @@ void GSCam::publish_stream()
 
   // Poll the data as fast a spossible
   while (!stop_signal_ && rclcpp::ok()) {
-    // This should block until a new frame is awake, this way, we'll run at the
-    // actual capture framerate of the device.
-    // RCLCPP_DEBUG(get_logger(), "Getting data...");
-    GstSample * sample = gst_app_sink_pull_sample(GST_APP_SINK(sink_));
+    // Try to pull a sample with a timeout so transient network issues don't
+    // immediately restart the pipeline. Only break on actual EOS.
+    GstSample * sample =
+      gst_app_sink_try_pull_sample(GST_APP_SINK(sink_), 5 * GST_SECOND);
     if (!sample) {
-      RCLCPP_ERROR(get_logger(), "Could not get gstreamer sample.");
-      break;
+      if (gst_app_sink_is_eos(GST_APP_SINK(sink_))) {
+        RCLCPP_INFO(get_logger(), "Could not get gstreamer sample.");
+        break;
+      }
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "Waiting for gstreamer sample (possible transient network issue)...");
+      continue;
     }
     GstBuffer * buf = gst_sample_get_buffer(sample);
     GstMemory * memory = gst_buffer_get_memory(buf, 0);
