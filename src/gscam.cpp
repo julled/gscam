@@ -96,6 +96,10 @@ void format_location_full_cb(
     return;
   }
 
+  // Read base_time here, not at setup time: the pipeline sets base_time only
+  // when transitioning to PLAYING, so any value captured before that is 0.
+  ctx->base_time = gst_element_get_base_time(splitmux);
+
   const auto location = build_segment_path(*ctx, buffer);
   g_object_set(G_OBJECT(splitmux), "location", location.c_str(), NULL);
   g_print("splitmuxsink: writing segment to %s\n", location.c_str());
