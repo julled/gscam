@@ -117,7 +117,6 @@ GSCam::GSCam(const rclcpp::NodeOptions & options)
   sink_(NULL),
   camera_info_manager_(this),
   time_offset_(0),
-  pipeline_base_time_(0),
   stop_signal_(false)
 {
   pipeline_thread_ = std::thread(
@@ -394,6 +393,11 @@ void GSCam::publish_stream()
   }
   RCLCPP_INFO(get_logger(), "Started stream.");
 
+  // Reset cached stream info so it is re-read on the first frame of each (re)start.
+  width_ = 0;
+  height_ = 0;
+  GstClockTime bt = 0;
+
   // Poll the data as fast a spossible
   while (!stop_signal_ && rclcpp::ok()) {
     // Try to pull a sample with a timeout so transient network issues don't
@@ -418,47 +422,32 @@ void GSCam::publish_stream()
     gsize & buf_size = info.size;
     guint8 * & buf_data = info.data;
 
-    GstClockTime bt = gst_element_get_base_time(pipeline_);
-    // RCLCPP_INFO(
-    //   get_logger(),
-    //   "New buffer: timestamp %.6f %lu %lu %.3f",
-    //   GST_TIME_AS_USECONDS(buf->timestamp + bt) / 1e6 + time_offset_,
-    //   buf->timestamp, bt, time_offset_);
-
-
-#if 0
-    GstFormat fmt = GST_FORMAT_TIME;
-    gint64 current = -1;
-
-    Query the current position of the stream
-    if (gst_element_query_position(pipeline_, &fmt, &current)) {
-      RCLCPP_INFO_STREAM(get_logger(), "Position " << current);
-    }
-#endif
-
     // Stop on end of stream
     if (!buf) {
       RCLCPP_INFO(get_logger(), "Stream ended.");
       break;
     }
 
-    // RCLCPP_DEBUG(get_logger(), "Got data.");
+    // Cache base_time and caps on the first frame; both are stable for the
+    // lifetime of a single PLAYING session and re-read on each restart.
+    if (width_ == 0) {
+      bt = gst_element_get_base_time(pipeline_);
 
-    // Get the image width and height
-    GstPad * pad = gst_element_get_static_pad(sink_, "sink");
-    GstCaps * frame_caps = gst_pad_get_current_caps(pad);
-    GstStructure * structure = gst_caps_get_structure(frame_caps, 0);
-    gst_structure_get_int(structure, "width", &width_);
-    gst_structure_get_int(structure, "height", &height_);
-    gst_caps_unref(frame_caps);
-    gst_object_unref(pad);
+      GstPad * pad = gst_element_get_static_pad(sink_, "sink");
+      GstCaps * frame_caps = gst_pad_get_current_caps(pad);
+      GstStructure * structure = gst_caps_get_structure(frame_caps, 0);
+      gst_structure_get_int(structure, "width", &width_);
+      gst_structure_get_int(structure, "height", &height_);
+      gst_caps_unref(frame_caps);
+      gst_object_unref(pad);
+    }
 
     // Update header information
     sensor_msgs::msg::CameraInfo cur_cinfo = camera_info_manager_.getCameraInfo();
     sensor_msgs::msg::CameraInfo::SharedPtr cinfo;
     cinfo.reset(new sensor_msgs::msg::CameraInfo(cur_cinfo));
     if (use_gst_timestamps_) {
-      cinfo->header.stamp = rclcpp::Time(GST_TIME_AS_NSECONDS(buf->pts + bt) + time_offset_);
+      cinfo->header.stamp = rclcpp::Time(GST_TIME_AS_NSECONDS(GST_BUFFER_PTS(buf) + bt) + time_offset_);
     } else {
       cinfo->header.stamp = now();
     }
@@ -590,9 +579,7 @@ void GSCam::setup_splitmux_recording()
     return;
   }
 
-  pipeline_base_time_ = gst_element_get_base_time(pipeline_);
-
-  auto * ctx = new SplitMuxContext{pipeline_base_time_, time_offset_, recording_path_,
+  auto * ctx = new SplitMuxContext{0, time_offset_, recording_path_,
     recording_suffix_};
 
   g_signal_connect_data(

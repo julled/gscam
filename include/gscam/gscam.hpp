@@ -80,7 +80,6 @@ private:
   // ROS Inteface
   // Calibration between ros::Time and gst timestamps
   int64_t time_offset_;
-  GstClockTime pipeline_base_time_;
   camera_info_manager::CameraInfoManager camera_info_manager_;
   image_transport::CameraPublisher camera_pub_;
   // Case of a jpeg only publisher
